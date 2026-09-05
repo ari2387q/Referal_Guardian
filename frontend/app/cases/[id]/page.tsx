@@ -1,200 +1,699 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Clock, Calendar, AlertTriangle, CheckCircle, Tag } from "lucide-react";
+import Link from "next/link";
+import { 
+  AlertTriangle, 
+  CheckCircle2, 
+  Clock, 
+  Sparkles, 
+  ArrowLeft,
+  Edit3,
+  RefreshCw,
+  Plus,
+  X,
+  FileText,
+  UserCheck,
+} from "lucide-react";
+import RouteGuard from "@/components/RouteGuard";
 
-interface CaseEvent {
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+const ALLOWED_ACTIONS = [
+  "CONTACT_PARENT",
+  "REQUEST_DOCUMENT",
+  "CONTACT_SPECIALIST",
+  "FIND_ALTERNATIVE_SPECIALIST",
+  "SCHEDULE_FOLLOWUP",
+  "ESCALATE_CASE",
+];
+
+const COMMON_TIMELINE_EVENTS = [
+  "SPECIALIST_CONTACTED",
+  "NO_RESPONSE",
+  "SPECIALIST_UNAVAILABLE",
+  "DOCUMENT_REQUESTED",
+  "DOCUMENT_RECEIVED",
+  "PARENT_CONTACTED",
+  "PARENT_UNREACHABLE",
+  "APPOINTMENT_REQUESTED",
+  "APPOINTMENT_DELAYED",
+];
+
+interface TimelineEvent {
   id: string;
-  case_id: string;
-  event_type: string;
-  details: string;
-  timestamp: string;
+  date: string;
+  event: string;
+  details?: string | null;
 }
 
-interface CaseDetail {
+interface AIRecommendation {
   id: string;
-  child_identifier: string;
+  bottleneck: string;
+  confidence: number;
+  recommended_action: string;
+  priority: string;
+  reason: string;
+  evidence_event_ids: string[];
+  requires_human_approval: boolean;
+}
+
+interface CaseDetails {
+  id: string;
+  child_id: string;
   referral_type: string;
   status: string;
-  coordinator_id: string | null;
-  current_bottleneck: string | null;
-  created_date: string;
-  last_activity: string;
+  coordinator: string;
+  assigned_specialist_name?: string;
+  bottleneck: string | null;
+  coordinator_notes?: string;
+  diagnostic_details?: string;
   days_open: number;
   followup_attempts: number;
-  events: CaseEvent[];
+  timeline: TimelineEvent[];
+  recommendation: AIRecommendation | null;
+  verification?: {
+    success: boolean;
+    status: string;
+    reason?: string;
+  } | null;
+  action_result?: {
+    status: string;
+    action?: string;
+    message?: string;
+  } | null;
 }
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 export default function CaseDetailPage() {
   const params = useParams();
-  const id = params?.id as string;
+  const caseId = (params?.id as string) || "CASE-1042";
 
-  const [caseData, setCaseData] = useState<CaseDetail | null>(null);
+  const [caseData, setCaseData] = useState<CaseDetails | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
+  const [runningAgent, setRunningAgent] = useState<boolean>(false);
+  const [actionSuccessMsg, setActionSuccessMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isModifying, setIsModifying] = useState(false);
+  const [modifiedAction, setModifiedAction] = useState("CONTACT_SPECIALIST");
+  const [modifyReason, setModifyReason] = useState("");
+  const [coordinatorNotesInput, setCoordinatorNotesInput] = useState("");
 
-  useEffect(() => {
-    if (!id) return;
+  // Add Event Modal state
+  const [showEventModal, setShowEventModal] = useState(false);
+  const [selectedEventType, setSelectedEventType] = useState("SPECIALIST_UNAVAILABLE");
+  const [customEventDetails, setCustomEventDetails] = useState("");
+  const [addingEvent, setAddingEvent] = useState(false);
 
-    async function fetchCase() {
-      try {
-        setLoading(true);
-        const res = await fetch(`${API_BASE}/api/cases/${id}`);
-        if (!res.ok) {
-          if (res.status === 404) {
-            throw new Error(`Case ${id} not found.`);
-          }
-          throw new Error("Failed to fetch case details.");
-        }
-        const data: CaseDetail = await res.json();
-        setCaseData(data);
-        setError(null);
-      } catch (err: any) {
-        setError(err.message || "An unexpected error occurred.");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchCase();
-  }, [id]);
-
-  const formatDate = (isoString: string) => {
+  const fetchCaseFromBackend = async () => {
     try {
-      const date = new Date(isoString);
-      return date.toLocaleDateString(undefined, {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}`);
+      if (!res.ok) throw new Error("Could not reach backend");
+      const data = await res.json();
+
+      const timeline: TimelineEvent[] = (data.timeline || []).map((t: any) => ({
+        id: t.id,
+        date: t.timestamp ? new Date(t.timestamp).toLocaleDateString() : (t.date || "Recent"),
+        event: t.event_type || t.event || "EVENT",
+        details: t.details,
+      }));
+
+      const rec: AIRecommendation | null = data.recommendation
+        ? {
+            id: data.recommendation.id,
+            bottleneck: data.recommendation.bottleneck,
+            confidence: data.recommendation.confidence,
+            recommended_action: data.recommendation.recommended_action,
+            priority: data.recommendation.priority,
+            reason: data.recommendation.reason,
+            evidence_event_ids: data.recommendation.evidence || [],
+            requires_human_approval: true,
+          }
+        : null;
+
+      setCaseData({
+        id: data.id,
+        child_id: data.child_identifier || "STU-8821",
+        referral_type: data.referral_type || "Evaluation",
+        status: data.status,
+        coordinator: data.coordinator_id || "Dr. Smith",
+        assigned_specialist_name: data.assigned_specialist_name,
+        bottleneck: data.current_bottleneck || (rec ? rec.bottleneck : null),
+        coordinator_notes: data.coordinator_notes,
+        diagnostic_details: data.diagnostic_details,
+        days_open: data.days_open || 0,
+        followup_attempts: data.followup_attempts || 0,
+        timeline,
+        recommendation: rec,
       });
+      if (data.coordinator_notes) {
+        setCoordinatorNotesInput(data.coordinator_notes);
+      }
+      return true;
     } catch {
-      return isoString;
+      return false;
     }
   };
 
-  return (
-    <div className="space-y-6 max-w-4xl mx-auto">
-      {/* Back navigation */}
-      <div>
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-600 hover:text-indigo-800 transition-colors"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          Back to Cases
+  useEffect(() => {
+    const init = async () => {
+      setLoading(true);
+      await fetchCaseFromBackend();
+      setLoading(false);
+    };
+    init();
+  }, [caseId]);
+
+  const handleRunAgent = async () => {
+    setRunningAgent(true);
+    setErrorMsg(null);
+    setActionSuccessMsg(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/agent/run`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        await fetchCaseFromBackend();
+        setActionSuccessMsg("Referral Guardian analyzed case and paused for human approval.");
+      } else {
+        setErrorMsg("Failed to run agent.");
+      }
+    } catch (err: any) {
+      setErrorMsg("Network error running agent: " + err.message);
+    } finally {
+      setRunningAgent(false);
+    }
+  };
+
+  const handleApproveAction = async () => {
+    if (!caseData || !caseData.recommendation) return;
+    setRunningAgent(true);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/agent/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          approver_id: "staff",
+          coordinator_notes: coordinatorNotesInput || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        await fetchCaseFromBackend();
+        setActionSuccessMsg(
+          data.action_result?.message || "Action approved, executed & verified successfully!"
+        );
+      } else {
+        setErrorMsg("Failed to approve action.");
+      }
+    } catch (err: any) {
+      setErrorMsg("Network error: " + err.message);
+    } finally {
+      setRunningAgent(false);
+    }
+  };
+
+  const handleModifyAction = async () => {
+    if (!caseData || !caseData.recommendation) return;
+    setRunningAgent(true);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/agent/modify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: modifiedAction,
+          reason: modifyReason,
+          coordinator_notes: coordinatorNotesInput || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        await fetchCaseFromBackend();
+        setIsModifying(false);
+        setActionSuccessMsg(
+          data.action_result?.message || `Modified action ${modifiedAction} executed & verified!`
+        );
+      } else {
+        setErrorMsg("Failed to modify action.");
+      }
+    } catch (err: any) {
+      setErrorMsg("Network error: " + err.message);
+    } finally {
+      setRunningAgent(false);
+    }
+  };
+
+  const handleRejectAction = async () => {
+    if (!caseData || !caseData.recommendation) return;
+    setRunningAgent(true);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/agent/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reason: "Coordinator chose not to proceed.",
+          coordinator_notes: coordinatorNotesInput || undefined,
+        }),
+      });
+      if (res.ok) {
+        await fetchCaseFromBackend();
+        setActionSuccessMsg("Recommendation rejected. Run ended.");
+      }
+    } catch (err: any) {
+      setErrorMsg("Error rejecting recommendation: " + err.message);
+    } finally {
+      setRunningAgent(false);
+    }
+  };
+
+  const handleAddTimelineEvent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAddingEvent(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/cases/${caseId}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event_type: selectedEventType,
+          details: customEventDetails.trim() || `Manual milestone: ${selectedEventType.replace(/_/g, " ")}`,
+        }),
+      });
+
+      if (res.ok) {
+        setShowEventModal(false);
+        setCustomEventDetails("");
+        await fetchCaseFromBackend();
+        setActionSuccessMsg(`Added '${selectedEventType}' to timeline. You can now re-run the agent!`);
+      } else {
+        alert("Failed to add event");
+      }
+    } catch (err) {
+      console.error("Add event error:", err);
+    } finally {
+      setAddingEvent(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="py-20 text-center space-y-3">
+        <RefreshCw className="w-8 h-8 animate-spin text-indigo-600 mx-auto" />
+        <p className="text-sm text-slate-500 font-medium">Loading case details & timeline...</p>
+      </div>
+    );
+  }
+
+  if (!caseData) {
+    return (
+      <div className="py-20 text-center space-y-4">
+        <h2 className="text-xl font-bold text-slate-800">Case Not Found</h2>
+        <Link href="/" className="text-indigo-600 text-sm font-semibold hover:underline">
+          ← Back to Dashboard
         </Link>
       </div>
+    );
+  }
 
-      {loading && (
-        <div className="bg-white p-8 rounded-xl border border-slate-200 text-center text-slate-500 shadow-sm">
-          Loading case information...
+  return (
+    <RouteGuard>
+    <div className="space-y-6">
+      {/* Top Navigation */}
+      <div className="flex items-center justify-between">
+        <Link
+          href="/"
+          className="inline-flex items-center space-x-1.5 text-xs font-semibold text-slate-500 hover:text-indigo-600 transition"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to Cases Dashboard</span>
+        </Link>
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={() => setShowEventModal(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-semibold hover:bg-indigo-100 transition"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Add Timeline Event</span>
+          </button>
+          <button
+            onClick={fetchCaseFromBackend}
+            className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"
+            title="Refresh case"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
         </div>
-      )}
+      </div>
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-xl text-sm">
-          <strong>Error:</strong> {error}
+      {/* Case Header Card */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center space-x-3">
+              <h1 className="text-2xl font-bold text-slate-900">{caseData.id}</h1>
+              <span className="text-sm font-medium text-slate-500">({caseData.child_id})</span>
+              {caseData.status === "ESCALATED" ? (
+                <span className="bg-rose-100 text-rose-700 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-rose-200">
+                  ESCALATED
+                </span>
+              ) : caseData.status === "STUCK" || Boolean(caseData.bottleneck) ? (
+                <span className="bg-amber-100 text-amber-800 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-amber-200">
+                  STUCK
+                </span>
+              ) : (
+                <span className="bg-emerald-100 text-emerald-700 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-emerald-200">
+                  {caseData.status}
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-slate-600 mt-1">
+              Referral Type: <strong className="text-slate-800">{caseData.referral_type}</strong> • Coordinator: <strong className="text-slate-800">{caseData.coordinator}</strong>
+            </p>
+          </div>
+
+          <button
+            onClick={handleRunAgent}
+            disabled={runningAgent}
+            className="inline-flex items-center justify-center space-x-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-semibold text-sm px-5 py-2.5 rounded-lg shadow-sm transition disabled:opacity-50"
+          >
+            <Sparkles className={`w-4 h-4 ${runningAgent ? "animate-spin" : ""}`} />
+            <span>{runningAgent ? "Evaluating Graph..." : "Run Referral Guardian AI"}</span>
+          </button>
         </div>
-      )}
 
-      {caseData && !loading && (
-        <>
-          {/* Header Card */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
-                    {caseData.id}
-                  </span>
-                  <span
-                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                      caseData.status === "ACTIVE"
-                        ? "bg-indigo-100 text-indigo-800"
-                        : caseData.status === "NEW"
-                        ? "bg-slate-100 text-slate-800"
-                        : "bg-emerald-100 text-emerald-800"
-                    }`}
-                  >
-                    {caseData.status}
-                  </span>
-                </div>
-                <h2 className="text-2xl font-bold text-slate-900 mt-2">
-                  Child ID: {caseData.child_identifier}
-                </h2>
-                <p className="text-sm font-medium text-slate-600 mt-1 flex items-center gap-1.5">
-                  <Tag className="w-4 h-4 text-slate-400" />
-                  {caseData.referral_type}
-                </p>
-              </div>
+        {/* Highlighted Alerts */}
+        {caseData.bottleneck && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3.5 flex items-start space-x-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-900 space-y-0.5">
+              <span className="font-bold uppercase tracking-wider">Active Bottleneck Detected:</span>
+              <p className="font-semibold text-amber-800">{caseData.bottleneck.replace(/_/g, " ")}</p>
+            </div>
+          </div>
+        )}
 
-              {/* Quick stats on case */}
-              <div className="flex sm:flex-col items-end gap-1.5 bg-slate-50 sm:bg-transparent p-3 sm:p-0 rounded-lg">
-                <div className="flex items-center gap-1 text-sm font-medium text-slate-700">
-                  <Clock className="w-4 h-4 text-slate-400" />
-                  <span>Days Open:</span>
-                  <span className="font-bold text-slate-900">{caseData.days_open}</span>
-                </div>
-                <div className="text-xs text-slate-500">
-                  Follow-up Attempts: {caseData.followup_attempts}
-                </div>
+        {caseData.coordinator_notes && (
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 flex items-start space-x-3">
+            <FileText className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-slate-700">
+              <span className="font-bold text-slate-900">Coordinator Notes: </span>
+              <span>"{caseData.coordinator_notes}"</span>
+            </div>
+          </div>
+        )}
+
+        {caseData.diagnostic_details && (
+          <div className="bg-purple-50 border border-purple-200 rounded-lg p-3.5 flex items-start space-x-3">
+            <UserCheck className="w-4 h-4 text-purple-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-purple-900">
+              <span className="font-bold">Special Educator Findings: </span>
+              <span>"{caseData.diagnostic_details}"</span>
+            </div>
+          </div>
+        )}
+
+        {actionSuccessMsg && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3.5 text-xs text-emerald-800 font-semibold flex items-center space-x-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{actionSuccessMsg}</span>
+          </div>
+        )}
+
+        {errorMsg && (
+          <div className="bg-rose-50 border border-rose-200 rounded-lg p-3.5 text-xs text-rose-800 font-semibold">
+            {errorMsg}
+          </div>
+        )}
+      </div>
+
+      {/* Main Grid: AI Recommendation Card (2 cols) vs Timeline (1 col) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* Left Column: AI Recommendation & Human Approval (2 cols) */}
+        <div className="lg:col-span-2 space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-5 h-5 text-indigo-600" />
+                <h2 className="font-bold text-slate-800 text-lg">AI Recommendation & Human Approval</h2>
               </div>
+              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200">
+                LangGraph State
+              </span>
             </div>
 
-            {/* Bottleneck alert if present */}
-            {caseData.current_bottleneck && (
-              <div className="mt-4 flex items-center gap-2.5 bg-amber-50 border border-amber-200 text-amber-800 text-xs sm:text-sm px-3.5 py-2.5 rounded-lg">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <div>
-                  <span className="font-semibold">Current Bottleneck:</span>{" "}
-                  <span className="font-mono">{caseData.current_bottleneck}</span>
-                </div>
-              </div>
-            )}
-          </div>
+            <div className="p-6">
+              {caseData.recommendation ? (
+                <div className="space-y-5">
+                  {/* Recommendation Summary */}
+                  <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase tracking-wider text-indigo-600">
+                        Proposed Next Best Action
+                      </span>
+                      <span className="text-xs font-bold px-2 py-0.5 rounded bg-indigo-600 text-white">
+                        {caseData.recommendation.priority} Priority ({Math.round(caseData.recommendation.confidence * 100)}% Confidence)
+                      </span>
+                    </div>
 
-          {/* Vertical Timeline */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-            <h3 className="text-base font-semibold text-slate-900 mb-6">
-              Activity & Event Timeline
-            </h3>
-
-            {caseData.events.length === 0 ? (
-              <p className="text-sm text-slate-400 italic">No recorded events yet for this case.</p>
-            ) : (
-              <div className="relative pl-6 border-l-2 border-slate-200 space-y-8 ml-2">
-                {caseData.events.map((event, index) => (
-                  <div key={event.id} className="relative group">
-                    {/* Timeline Node Point */}
-                    <div className="absolute -left-[31px] top-1 w-4 h-4 rounded-full bg-white border-2 border-indigo-600 group-hover:scale-110 transition-transform" />
-
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-800">
-                          {event.event_type}
-                        </span>
-                        <span className="text-xs text-slate-400 flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          {formatDate(event.timestamp)}
-                        </span>
-                      </div>
-                      <p className="text-sm text-slate-700 font-medium pt-0.5">
-                        {event.details}
-                      </p>
+                    <div className="text-xl font-extrabold text-slate-900 font-mono">
+                      {caseData.recommendation.recommended_action.replace(/_/g, " ")}
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
+
+                  {/* Operational Reasoning */}
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                      Agent Operational Reasoning
+                    </h4>
+                    <p className="text-sm text-slate-700 bg-slate-50 p-4 rounded-lg border border-slate-200 leading-relaxed">
+                      "{caseData.recommendation.reason}"
+                    </p>
+                  </div>
+
+                  {/* Evidence */}
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                      Evidence from Timeline
+                    </h4>
+                    <ul className="text-xs text-slate-600 space-y-1 list-disc list-inside bg-slate-50 p-3 rounded-lg border border-slate-200 font-mono">
+                      {caseData.recommendation.evidence_event_ids.map((item, i) => (
+                        <li key={i}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {/* Coordinator Notes Input for Handoff */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                      Coordinator Instructions / Notes for Special Educator (Handoff)
+                    </label>
+                    <textarea
+                      rows={2}
+                      placeholder="Add notes to accompany this action and hand off to the Special Educator..."
+                      value={coordinatorNotesInput}
+                      onChange={(e) => setCoordinatorNotesInput(e.target.value)}
+                      className="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  {/* Modification Mode */}
+                  {isModifying && (
+                    <div className="p-4 bg-amber-50 rounded-lg border border-amber-200 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-amber-900 uppercase">Override Recommended Action</span>
+                        <button onClick={() => setIsModifying(false)} className="text-xs text-amber-700 hover:underline">
+                          Cancel
+                        </button>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-amber-800 font-medium mb-1">Select Replacement Action</label>
+                        <select
+                          className="w-full text-xs font-mono bg-white border border-amber-300 rounded p-2 text-slate-800"
+                          value={modifiedAction}
+                          onChange={(e) => setModifiedAction(e.target.value)}
+                        >
+                          {ALLOWED_ACTIONS.map((a) => (
+                            <option key={a} value={a}>{a.replace(/_/g, " ")}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-amber-800 font-medium mb-1">Reason for override</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Coordinator prefers alternative specialist first..."
+                          className="w-full text-xs bg-white border border-amber-300 rounded p-2 text-slate-800"
+                          value={modifyReason}
+                          onChange={(e) => setModifyReason(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        onClick={handleModifyAction}
+                        disabled={runningAgent}
+                        className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded transition"
+                      >
+                        Confirm & Execute Modified Action
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Approval Action Buttons */}
+                  {!isModifying && (
+                    <div className="flex items-center space-x-3 pt-4 border-t border-slate-200">
+                      <button
+                        onClick={handleApproveAction}
+                        disabled={runningAgent}
+                        className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm py-3 rounded-lg transition shadow-xs flex items-center justify-center space-x-2 disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-5 h-5" />
+                        <span>APPROVE & EXECUTE</span>
+                      </button>
+                      <button
+                        onClick={() => setIsModifying(true)}
+                        disabled={runningAgent}
+                        className="bg-amber-500 hover:bg-amber-600 text-white font-semibold text-sm px-5 py-3 rounded-lg transition shadow-xs flex items-center space-x-1.5 disabled:opacity-50"
+                      >
+                        <Edit3 className="w-4 h-4" />
+                        <span>MODIFY</span>
+                      </button>
+                      <button
+                        onClick={handleRejectAction}
+                        disabled={runningAgent}
+                        className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-sm px-5 py-3 rounded-lg transition disabled:opacity-50"
+                      >
+                        REJECT
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="py-12 text-center space-y-4">
+                  <Sparkles className="w-10 h-10 text-indigo-400 mx-auto" />
+                  <div>
+                    <h3 className="font-bold text-slate-800 text-base">No Pending Recommendation</h3>
+                    <p className="text-sm text-slate-500 max-w-md mx-auto mt-1">
+                      Click <strong>"Run Referral Guardian AI"</strong> to evaluate the case history, detect bottlenecks, and propose next-best actions.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleRunAgent}
+                    disabled={runningAgent}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg shadow-xs disabled:opacity-50 inline-flex items-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>Run Agent Now</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </>
+        </div>
+
+        {/* Right Column: Case Timeline (1 col) */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-6 space-y-6">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <h2 className="font-bold text-slate-800 text-lg flex items-center space-x-2">
+              <Clock className="w-5 h-5 text-indigo-600" />
+              <span>Case Timeline</span>
+            </h2>
+            <button
+              onClick={() => setShowEventModal(true)}
+              className="text-xs text-indigo-600 hover:underline font-semibold"
+            >
+              + Add Event
+            </button>
+          </div>
+
+          <div className="relative border-l-2 border-slate-200 ml-3 space-y-6 max-h-[500px] overflow-y-auto pr-2">
+            {caseData.timeline.map((evt) => (
+              <div key={evt.id} className="ml-6 relative">
+                <div className="absolute -left-[31px] top-0 w-3 h-3 rounded-full bg-indigo-600 border-2 border-white ring-4 ring-slate-100" />
+                <div>
+                  <span className="text-xs font-semibold text-slate-400">{evt.date}</span>
+                  <div className="text-xs font-bold text-slate-800 mt-0.5">
+                    {evt.event.replace(/_/g, " ")}
+                  </div>
+                  {evt.details && (
+                    <p className="text-[11px] text-slate-500 mt-1 bg-slate-50 p-1.5 rounded border border-slate-100 font-mono">
+                      {evt.details}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+      </div>
+
+      {/* Add Event Modal for Testing Bottlenecks */}
+      {showEventModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-base font-bold text-slate-900">Add Timeline Event</h3>
+              <button onClick={() => setShowEventModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddTimelineEvent} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Event Type
+                </label>
+                <select
+                  value={selectedEventType}
+                  onChange={(e) => setSelectedEventType(e.target.value)}
+                  className="w-full text-xs font-mono p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                >
+                  {COMMON_TIMELINE_EVENTS.map((evt) => (
+                    <option key={evt} value={evt}>{evt}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Event Details / Description
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="e.g. Specialist Dr. Vance reported 0 openings this month..."
+                  value={customEventDetails}
+                  onChange={(e) => setCustomEventDetails(e.target.value)}
+                  className="w-full text-xs p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end space-x-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowEventModal(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={addingEvent}
+                  className="px-5 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition shadow-xs disabled:opacity-50"
+                >
+                  {addingEvent ? "Adding..." : "Add Event"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
+    </RouteGuard>
   );
 }

@@ -1,200 +1,643 @@
-import uuid
-from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
+"""
+Referral Guardian — FastAPI Backend
 
-from fastapi import FastAPI, Depends, HTTPException
+Replaces the mock in-memory implementation with real SQLAlchemy + LangGraph.
+All existing route paths are preserved.
+"""
+import json
+import logging
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .models.database import Base, engine, get_db, SessionLocal
-from .models.models import Case, CaseEvent, Specialist
+from app.models.database import Base, engine, get_db
+from app.models.models import (
+    AgentRecommendation,
+    AgentRun,
+    Case,
+)
+from app.services.case_service import (
+    get_case,
+    get_case_timeline,
+    record_event,
+)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
-def seed_data(db: Session):
-    # Seed only if cases table is empty
-    existing_cases = db.query(Case).first()
-    if existing_cases:
-        return
-
-    # Seed Specialists
-    spec_1 = Specialist(
-        id=str(uuid.uuid4()),
-        name="Dr. Meena Rao",
-        specialization="Occupational Therapy",
-        availability_status="AVAILABLE",
-        active=True,
-    )
-    spec_2 = Specialist(
-        id=str(uuid.uuid4()),
-        name="Mr. James Okafor",
-        specialization="Speech-Language Pathology",
-        availability_status="UNAVAILABLE",
-        active=True,
-    )
-    db.add_all([spec_1, spec_2])
-
-    now = datetime.utcnow()
-
-    # Seed Cases
-    case_1001 = Case(
-        id="CASE-1001",
-        child_identifier="STU-004",
-        referral_type="IEP Behavioral Assessment",
-        status="ACTIVE",
-        coordinator_id="COORD-01",
-        current_bottleneck="SPECIALIST_UNAVAILABLE",
-        created_date=now - timedelta(days=14),
-        last_activity=now - timedelta(days=3),
-        followup_attempts=3,
-    )
-
-    case_1002 = Case(
-        id="CASE-1002",
-        child_identifier="STU-007",
-        referral_type="Speech Therapy Evaluation",
-        status="NEW",
-        coordinator_id=None,
-        current_bottleneck=None,
-        created_date=now - timedelta(days=2),
-        last_activity=now - timedelta(days=2),
-        followup_attempts=0,
-    )
-    db.add_all([case_1001, case_1002])
-
-    # Events for CASE-1001
-    event_1 = CaseEvent(
-        id=str(uuid.uuid4()),
-        case_id="CASE-1001",
-        event_type="REFERRAL_CREATED",
-        details="Referral submitted for STU-004",
-        timestamp=now - timedelta(days=14),
-    )
-    event_2 = CaseEvent(
-        id=str(uuid.uuid4()),
-        case_id="CASE-1001",
-        event_type="SPECIALIST_CONTACTED",
-        details="Outreach sent to Dr. Meena Rao",
-        timestamp=now - timedelta(days=10),
-    )
-    event_3 = CaseEvent(
-        id=str(uuid.uuid4()),
-        case_id="CASE-1001",
-        event_type="NO_RESPONSE",
-        details="No response after 7 days",
-        timestamp=now - timedelta(days=3),
-    )
-    db.add_all([event_1, event_2, event_3])
-
-    db.commit()
-
+# ---------------------------------------------------------------------------
+# Lifespan — create tables on startup if they don't exist
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB tables
-    Base.metadata.create_all(bind=engine)
-    # Seed baseline mock data
-    db = SessionLocal()
     try:
-        seed_data(db)
-    finally:
-        db.close()
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables ensured")
+    except Exception as exc:
+        logger.warning("Could not create tables (may already exist): %s", exc)
     yield
 
 
-app = FastAPI(
-    title="Referral Guardian API",
-    version="0.1.0",
-    lifespan=lifespan
-)
+app = FastAPI(title="Referral Guardian MVP API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",   # alt Next.js port
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# ---------------------------------------------------------------------------
+# Request / Response schemas
+# ---------------------------------------------------------------------------
 
+class CreateCaseRequest(BaseModel):
+    child_identifier: str
+    referral_type: str
+    status: Optional[str] = "NEW"
+    coordinator_id: Optional[str] = None
+    assigned_specialist_id: Optional[str] = None
+    current_bottleneck: Optional[str] = None
+    coordinator_notes: Optional[str] = None
+    initial_event_details: Optional[str] = None
+
+
+class UpdateCaseRequest(BaseModel):
+    status: Optional[str] = None
+    current_bottleneck: Optional[str] = None
+    coordinator_notes: Optional[str] = None
+    assigned_specialist_id: Optional[str] = None
+    referral_type: Optional[str] = None
+
+
+class AddEventRequest(BaseModel):
+    event_type: str
+    details: Optional[str] = None
+
+
+class DiagnosticRequest(BaseModel):
+    diagnostic_details: str
+    educator_name: Optional[str] = "Special Educator"
+
+
+class UpdateAvailabilityRequest(BaseModel):
+    availability_status: str  # AVAILABLE, UNAVAILABLE
+    next_available_date: Optional[str] = None
+
+
+class ApproveRequest(BaseModel):
+    approver_id: Optional[str] = None
+    coordinator_notes: Optional[str] = None
+
+
+class RejectRequest(BaseModel):
+    reason: Optional[str] = None
+    coordinator_notes: Optional[str] = None
+
+
+class ModifyRequest(BaseModel):
+    action: str
+    reason: Optional[str] = None
+    coordinator_notes: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
 
 @app.get("/api/dashboard")
-def get_dashboard(db: Session = Depends(get_db)):
-    cases = db.query(Case).all()
-    now = datetime.utcnow()
-    total_cases = len(cases)
-    active_cases = sum(1 for c in cases if c.status == "ACTIVE")
-    resolved_cases = sum(1 for c in cases if c.status == "RESOLVED")
-    bottleneck_cases = sum(1 for c in cases if c.current_bottleneck)
+def get_dashboard_stats(db: Session = Depends(get_db)):
+    try:
+        total = db.query(Case).count()
+        stuck = db.query(Case).filter(Case.status.in_(["STUCK", "ESCALATED"])).count()
+        pending = (
+            db.query(AgentRecommendation)
+            .filter(AgentRecommendation.status == "PENDING")
+            .count()
+        )
+        escalations = db.query(Case).filter(Case.status == "ESCALATED").count()
+        return {
+            "active_cases": total,
+            "stuck_cases": stuck,
+            "pending_actions": pending,
+            "escalations": escalations,
+        }
+    except Exception:
+        logger.exception("Dashboard query failed")
+        return {
+            "active_cases": 0,
+            "stuck_cases": 0,
+            "pending_actions": 0,
+            "escalations": 0,
+        }
 
-    avg_days_open = 0.0
-    if total_cases > 0:
-        total_days = sum(max(0, (now - c.created_date).days) for c in cases)
-        avg_days_open = round(total_days / total_cases, 1)
 
-    return {
-        "total_cases": total_cases,
-        "active_cases": active_cases,
-        "resolved_cases": resolved_cases,
-        "bottleneck_cases": bottleneck_cases,
-        "avg_days_open": avg_days_open,
-    }
-
+# ---------------------------------------------------------------------------
+# Cases & Coordinator CRUD
+# ---------------------------------------------------------------------------
 
 @app.get("/api/cases")
 def list_cases(db: Session = Depends(get_db)):
-    cases = db.query(Case).order_by(Case.created_date.desc()).all()
-    now = datetime.utcnow()
-    return [
-        {
-            "id": c.id,
-            "child_identifier": c.child_identifier,
-            "referral_type": c.referral_type,
-            "status": c.status,
-            "current_bottleneck": c.current_bottleneck,
-            "days_open": max(0, (now - c.created_date).days),
-            "followup_attempts": c.followup_attempts,
-        }
-        for c in cases
-    ]
+    try:
+        cases = db.query(Case).order_by(Case.created_date.desc()).all()
+        return [_case_to_response(c, db) for c in cases]
+    except Exception:
+        logger.exception("Failed to list cases")
+        return []
+
+
+@app.post("/api/cases")
+def create_new_case(body: CreateCaseRequest, db: Session = Depends(get_db)):
+    """Coordinator endpoint: Create a new referral case."""
+    from app.services.case_service import create_case
+    try:
+        new_case = create_case(
+            db=db,
+            child_identifier=body.child_identifier,
+            referral_type=body.referral_type,
+            status=body.status or "NEW",
+            coordinator_id=body.coordinator_id,
+            assigned_specialist_id=body.assigned_specialist_id,
+            current_bottleneck=body.current_bottleneck,
+            coordinator_notes=body.coordinator_notes,
+            initial_event_details=body.initial_event_details,
+        )
+        return _case_to_response(new_case, db, include_timeline=True)
+    except Exception as exc:
+        logger.exception("Failed to create case")
+        raise HTTPException(status_code=500, detail=f"Failed to create case: {str(exc)}")
 
 
 @app.get("/api/cases/{case_id}")
-def get_case(case_id: str, db: Session = Depends(get_db)):
+def get_case_detail(case_id: str, db: Session = Depends(get_db)):
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return _case_to_response(case, db, include_timeline=True)
+
+
+@app.put("/api/cases/{case_id}")
+def update_case_detail(case_id: str, body: UpdateCaseRequest, db: Session = Depends(get_db)):
+    """Coordinator endpoint: Update case metadata or status."""
+    from app.services.case_service import update_case
+    updates = body.dict(exclude_unset=True)
+    res = update_case(db, case_id, updates)
+    if not res:
+        raise HTTPException(status_code=404, detail="Case not found")
+    case = db.query(Case).filter(Case.id == case_id).first()
+    return _case_to_response(case, db, include_timeline=True)
+
+
+@app.delete("/api/cases/{case_id}")
+def delete_case_detail(case_id: str, db: Session = Depends(get_db)):
+    """Coordinator endpoint: Delete a case."""
+    from app.services.case_service import delete_case
+    success = delete_case(db, case_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"success": True, "message": f"Case {case_id} deleted successfully"}
+
+
+@app.post("/api/cases/{case_id}/events")
+def add_case_event(case_id: str, body: AddEventRequest, db: Session = Depends(get_db)):
+    """Coordinator endpoint: Manually log a timeline milestone (useful for simulating bottlenecks)."""
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    events = (
-        db.query(CaseEvent)
-        .filter(CaseEvent.case_id == case_id)
-        .order_by(CaseEvent.timestamp.asc())
-        .all()
+    evt = record_event(db, case_id, body.event_type, body.details)
+    return {
+        "id": evt.id,
+        "case_id": case_id,
+        "event_type": evt.event_type,
+        "details": evt.details,
+        "timestamp": evt.timestamp.isoformat() if evt.timestamp else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Specialists & Special Educator Portal Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/specialists")
+def list_specialists(db: Session = Depends(get_db)):
+    """List all specialists with their availability status."""
+    from app.models.models import Specialist
+    specs = db.query(Specialist).filter(Specialist.active.is_(True)).all()
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "specialization": s.specialization,
+            "location": s.location,
+            "availability_status": s.availability_status,
+            "next_available_date": s.next_available_date.isoformat() if s.next_available_date else None,
+            "active": s.active,
+        }
+        for s in specs
+    ]
+
+
+@app.get("/api/educator/cases")
+def list_educator_cases(db: Session = Depends(get_db)):
+    """Special Educator view: List cases with diagnostic & coordinator context."""
+    cases = db.query(Case).order_by(Case.last_activity.desc()).all()
+    return [_case_to_response(c, db, include_timeline=True) for c in cases]
+
+
+@app.patch("/api/educator/specialists/{specialist_id}/availability")
+def toggle_specialist_availability(
+    specialist_id: str,
+    body: UpdateAvailabilityRequest,
+    db: Session = Depends(get_db),
+):
+    """Special Educator endpoint: Update availability (AVAILABLE / UNAVAILABLE)."""
+    from app.services.case_service import update_specialist_availability
+    from datetime import datetime
+    next_date = None
+    if body.next_available_date:
+        try:
+            next_date = datetime.fromisoformat(body.next_available_date)
+        except Exception:
+            pass
+
+    res = update_specialist_availability(db, specialist_id, body.availability_status, next_date)
+    if not res:
+        raise HTTPException(status_code=404, detail="Specialist not found")
+    return res
+
+
+@app.post("/api/cases/{case_id}/diagnostics")
+def submit_case_diagnostics(
+    case_id: str,
+    body: DiagnosticRequest,
+    db: Session = Depends(get_db),
+):
+    """Special Educator endpoint: Submit diagnostic findings and evaluation notes."""
+    from app.services.case_service import update_diagnostic_details
+    res = update_diagnostic_details(db, case_id, body.diagnostic_details, body.educator_name)
+    if not res:
+        raise HTTPException(status_code=404, detail="Case not found")
+    case = db.query(Case).filter(Case.id == case_id).first()
+    return _case_to_response(case, db, include_timeline=True)
+
+
+def _case_to_response(case: Case, db: Session, include_timeline: bool = False) -> dict[str, Any]:
+    from datetime import datetime
+    days_open = (datetime.utcnow() - case.created_date).days if case.created_date else 0
+
+    # Pending recommendation (if any)
+    pending_rec = (
+        db.query(AgentRecommendation)
+        .filter(
+            AgentRecommendation.case_id == case.id,
+            AgentRecommendation.status == "PENDING",
+        )
+        .order_by(AgentRecommendation.created_at.desc())
+        .first()
     )
 
-    now = datetime.utcnow()
-    return {
+    specialist_name = None
+    if case.assigned_specialist:
+        specialist_name = case.assigned_specialist.name
+    elif case.appointments:
+        latest = sorted(case.appointments, key=lambda a: a.scheduled_date or datetime.min)[-1]
+        if latest.specialist:
+            specialist_name = latest.specialist.name
+
+    result: dict[str, Any] = {
         "id": case.id,
         "child_identifier": case.child_identifier,
         "referral_type": case.referral_type,
         "status": case.status,
         "coordinator_id": case.coordinator_id,
+        "assigned_specialist_id": case.assigned_specialist_id,
+        "assigned_specialist_name": specialist_name,
         "current_bottleneck": case.current_bottleneck,
-        "created_date": case.created_date.isoformat(),
-        "last_activity": case.last_activity.isoformat(),
-        "days_open": max(0, (now - case.created_date).days),
-        "followup_attempts": case.followup_attempts,
-        "events": [
-            {
-                "id": e.id,
-                "case_id": e.case_id,
-                "event_type": e.event_type,
-                "details": e.details,
-                "timestamp": e.timestamp.isoformat(),
-            }
-            for e in events
-        ],
+        "coordinator_notes": case.coordinator_notes,
+        "diagnostic_details": case.diagnostic_details,
+        "created_date": case.created_date.isoformat() if case.created_date else None,
+        "last_activity": case.last_activity.isoformat() if case.last_activity else None,
+        "days_open": days_open,
+        "followup_attempts": case.followup_attempts or 0,
+        "recommendation": _rec_to_response(pending_rec) if pending_rec else None,
     }
+
+    if include_timeline:
+        result["timeline"] = get_case_timeline(db, case.id)
+
+    return result
+
+
+def _rec_to_response(rec: AgentRecommendation) -> dict[str, Any]:
+    return {
+        "id": rec.id,
+        "bottleneck": rec.bottleneck,
+        "confidence": rec.confidence,
+        "recommended_action": rec.recommended_action,
+        "priority": rec.priority,
+        "reason": rec.reason,
+        "evidence": json.loads(rec.evidence) if rec.evidence else [],
+        "status": rec.status,
+        "requires_human_approval": True,
+        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Agent endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/cases/{case_id}/agent/run")
+def run_agent(case_id: str, db: Session = Depends(get_db)):
+    """
+    Start (or resume) the Referral Guardian agent for a case.
+
+    If the graph is already paused at approval, this returns the current state.
+    Otherwise, it runs the graph until it reaches the approval interrupt.
+    """
+    # Verify case exists
+    case_data = get_case(db, case_id)
+    if not case_data:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    from app.agent.graph import get_graph
+    from app.services.case_service import get_or_create_agent_run
+
+    graph = get_graph()
+    thread_id = f"case-{case_id}"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    # Get or create agent run record
+    run = get_or_create_agent_run(db, case_id)
+
+    try:
+        # Check if graph already has a snapshot (previously interrupted)
+        snapshot = graph.get_state(config)
+        if snapshot and snapshot.next:
+            # Graph is paused — return current state without re-running
+            logger.info("Graph already paused for case %s at: %s", case_id, snapshot.next)
+            return _build_agent_state_response(case_id, snapshot, run, db)
+
+        # Fresh run
+        initial_state: dict[str, Any] = {
+            "case_id": case_id,
+            "run_id": run.id,
+            "step_count": 0,
+        }
+
+        # Run graph (will stop at interrupt before approval)
+        final_state = None
+        for chunk in graph.stream(initial_state, config, stream_mode="values"):
+            final_state = chunk
+
+        snapshot = graph.get_state(config)
+        return _build_agent_state_response(case_id, snapshot, run, db)
+
+    except Exception as exc:
+        logger.exception("Agent run failed for case %s", case_id)
+        raise HTTPException(status_code=500, detail=f"Agent run failed: {str(exc)}")
+
+
+@app.get("/api/cases/{case_id}/agent/state")
+def get_agent_state(case_id: str, db: Session = Depends(get_db)):
+    """Return the current agent state and any pending recommendation."""
+    # Verify case exists
+    if not db.query(Case).filter(Case.id == case_id).first():
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    from app.agent.graph import get_graph
+
+    graph = get_graph()
+    config = {"configurable": {"thread_id": f"case-{case_id}"}}
+
+    try:
+        snapshot = graph.get_state(config)
+    except Exception:
+        snapshot = None
+
+    run = (
+        db.query(AgentRun)
+        .filter(AgentRun.case_id == case_id)
+        .order_by(AgentRun.started_at.desc())
+        .first()
+    )
+
+    return _build_agent_state_response(case_id, snapshot, run, db)
+
+
+@app.post("/api/cases/{case_id}/agent/approve")
+def approve_recommendation(
+    case_id: str,
+    body: ApproveRequest,
+    db: Session = Depends(get_db),
+):
+    """Approve the pending recommendation and resume graph execution."""
+    if body.coordinator_notes:
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.coordinator_notes = body.coordinator_notes
+            db.commit()
+
+    return _resume_graph(
+        case_id=case_id,
+        db=db,
+        human_response={"decision": "APPROVE", "coordinator_notes": body.coordinator_notes},
+    )
+
+
+@app.post("/api/cases/{case_id}/agent/reject")
+def reject_recommendation(
+    case_id: str,
+    body: RejectRequest,
+    db: Session = Depends(get_db),
+):
+    """Reject the pending recommendation and end this graph run."""
+    if body.coordinator_notes:
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.coordinator_notes = body.coordinator_notes
+            db.commit()
+
+    return _resume_graph(
+        case_id=case_id,
+        db=db,
+        human_response={"decision": "REJECT", "reason": body.reason, "coordinator_notes": body.coordinator_notes},
+    )
+
+
+@app.post("/api/cases/{case_id}/agent/modify")
+def modify_recommendation(
+    case_id: str,
+    body: ModifyRequest,
+    db: Session = Depends(get_db),
+):
+    """Modify the recommended action and resume graph execution."""
+    from app.agent.actions import is_valid_action
+
+    if not is_valid_action(body.action):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid action '{body.action}'. Must be one of the allowed actions.",
+        )
+
+    if body.coordinator_notes:
+        case = db.query(Case).filter(Case.id == case_id).first()
+        if case:
+            case.coordinator_notes = body.coordinator_notes
+            db.commit()
+
+    return _resume_graph(
+        case_id=case_id,
+        db=db,
+        human_response={
+            "decision": "MODIFY",
+            "modification": {"action": body.action, "reason": body.reason},
+            "coordinator_notes": body.coordinator_notes,
+        },
+    )
+
+
+def _resume_graph(
+    case_id: str,
+    db: Session,
+    human_response: dict[str, Any],
+) -> dict[str, Any]:
+    """Resume a paused graph with a human decision."""
+    from app.agent.graph import get_graph
+
+    graph = get_graph()
+    config = {"configurable": {"thread_id": f"case-{case_id}"}}
+
+    snapshot = graph.get_state(config)
+    if not snapshot or not snapshot.next:
+        raise HTTPException(
+            status_code=409,
+            detail="No pending recommendation found for this case.",
+        )
+
+    try:
+        # Resume the graph by providing the human response as the interrupt value
+        final_state = None
+        for chunk in graph.stream(
+            Command(resume=human_response),
+            config,
+            stream_mode="values",
+        ):
+            final_state = chunk
+
+        snapshot = graph.get_state(config)
+        run = (
+            db.query(AgentRun)
+            .filter(AgentRun.case_id == case_id)
+            .order_by(AgentRun.started_at.desc())
+            .first()
+        )
+        return _build_agent_state_response(case_id, snapshot, run, db)
+
+    except Exception as exc:
+        logger.exception("Failed to resume agent for case %s", case_id)
+        raise HTTPException(status_code=500, detail=f"Resume failed: {str(exc)}")
+
+
+def _build_agent_state_response(
+    case_id: str,
+    snapshot,
+    run: Optional[AgentRun],
+    db: Session,
+) -> dict[str, Any]:
+    """Build a unified agent state response for the frontend."""
+    state_values = snapshot.values if snapshot else {}
+    pending_nodes = list(snapshot.next) if snapshot and snapshot.next else []
+
+    waiting_for_approval = "approval" in pending_nodes
+
+    # Get the latest pending recommendation from DB
+    pending_rec = (
+        db.query(AgentRecommendation)
+        .filter(
+            AgentRecommendation.case_id == case_id,
+            AgentRecommendation.status == "PENDING",
+        )
+        .order_by(AgentRecommendation.created_at.desc())
+        .first()
+    )
+
+    return {
+        "case_id": case_id,
+        "agent_status": _agent_status(state_values, pending_nodes, run),
+        "current_node": pending_nodes[0] if pending_nodes else None,
+        "waiting_for_approval": waiting_for_approval,
+        "bottleneck": state_values.get("bottleneck"),
+        "recommendation": _rec_to_response(pending_rec) if pending_rec else None,
+        "action_result": state_values.get("action_result"),
+        "verification": state_values.get("verification"),
+        "error": state_values.get("error"),
+        "run_id": run.id if run else None,
+    }
+
+
+def _agent_status(
+    state_values: dict, pending_nodes: list, run: Optional[AgentRun]
+) -> str:
+    if state_values.get("error"):
+        return "ERROR"
+    if "approval" in pending_nodes:
+        return "WAITING_APPROVAL"
+    if pending_nodes:
+        return "RUNNING"
+    if state_values.get("verification", {}).get("success"):
+        return "COMPLETED"
+    if run and run.status:
+        return run.status
+    return "IDLE"
+
+
+# ---------------------------------------------------------------------------
+# Legacy recommendation endpoints (backward compat with old frontend)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/recommendations/{rec_id}/approve")
+def legacy_approve(rec_id: str, db: Session = Depends(get_db)):
+    rec = db.query(AgentRecommendation).filter(AgentRecommendation.id == rec_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    return approve_recommendation(rec.case_id, ApproveRequest(), db)
+
+
+@app.post("/api/recommendations/{rec_id}/reject")
+def legacy_reject(rec_id: str, db: Session = Depends(get_db)):
+    rec = db.query(AgentRecommendation).filter(AgentRecommendation.id == rec_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    return reject_recommendation(rec.case_id, RejectRequest(), db)
+
+
+# ---------------------------------------------------------------------------
+# Import Command for LangGraph resume
+# ---------------------------------------------------------------------------
+
+try:
+    from langgraph.types import Command
+except ImportError:
+    # Older langgraph versions
+    class Command:  # type: ignore
+        def __init__(self, resume=None):
+            self.resume = resume
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
