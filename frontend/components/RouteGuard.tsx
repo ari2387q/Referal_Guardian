@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth, UserRole } from "@/lib/AuthContext";
+import { portalPath, useAuth, UserRole } from "@/lib/AuthContext";
 
 interface RouteGuardProps {
   /** Which role(s) are allowed. Omit to allow any authenticated user. */
@@ -27,7 +27,7 @@ export default function RouteGuard({ allowedRoles, children }: RouteGuardProps) 
       return;
     }
     if (allowedRoles && !allowedRoles.includes(profile.role)) {
-      router.replace(profile.role === "coordinator" ? "/" : "/educator");
+      router.replace(portalPath(profile.role));
     }
   }, [loading, profile, allowedRoles, router]);
 

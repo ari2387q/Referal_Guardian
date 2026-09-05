@@ -1,16 +1,64 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { User, Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
 export type UserRole = "coordinator" | "special_educator";
 
-interface UserProfile {
+export interface UserProfile {
   id: string;
   email: string;
   role: UserRole;
   fullName: string;
+  isDemo?: boolean;
+}
+
+export function portalPath(role: UserRole) {
+  return role === "special_educator" ? "/educator" : "/";
+}
+
+export function isUserRole(value: unknown): value is UserRole {
+  return value === "coordinator" || value === "special_educator";
+}
+
+function profileFromUser(user: User, fallbackRole: UserRole = "coordinator"): UserProfile {
+  const metaRole = user.user_metadata?.role;
+  return {
+    id: user.id,
+    email: user.email || "",
+    role: isUserRole(metaRole) ? metaRole : fallbackRole,
+    fullName: user.user_metadata?.full_name || user.email?.split("@")[0] || "User",
+    isDemo: false,
+  };
+}
+
+function readDemoProfile(): UserProfile | null {
+  if (typeof window === "undefined") return null;
+  const role = localStorage.getItem("rg_role");
+  const email = localStorage.getItem("rg_email");
+  const name = localStorage.getItem("rg_name");
+  if (!isUserRole(role) || !email) return null;
+  return {
+    id: "local-demo-user",
+    email,
+    role,
+    fullName: name || email.split("@")[0],
+    isDemo: true,
+  };
+}
+
+function writeDemoProfile(role: UserRole, email: string, name: string) {
+  localStorage.setItem("rg_role", role);
+  localStorage.setItem("rg_email", email);
+  localStorage.setItem("rg_name", name);
+}
+
+function clearDemoStorage() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("rg_role");
+  localStorage.removeItem("rg_email");
+  localStorage.removeItem("rg_name");
 }
 
 interface AuthContextType {
@@ -19,7 +67,7 @@ interface AuthContextType {
   profile: UserProfile | null;
   loading: boolean;
   signOut: () => Promise<void>;
-  setDemoUser: (role: UserRole, email: string, name: string) => void;
+  setDemoUser: (role: UserRole, email: string, name: string) => UserProfile;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -28,7 +76,13 @@ const AuthContext = createContext<AuthContextType>({
   profile: null,
   loading: true,
   signOut: async () => {},
-  setDemoUser: () => {},
+  setDemoUser: () => ({
+    id: "demo",
+    email: "demo@school.org",
+    role: "coordinator",
+    fullName: "Coordinator",
+    isDemo: true,
+  }),
 });
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
@@ -37,96 +91,73 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const applySession = useCallback((next: Session | null) => {
+    setSession(next);
+    setUser(next?.user ?? null);
+    if (next?.user) {
+      clearDemoStorage();
+      setProfile(profileFromUser(next.user));
+      return;
+    }
+    setProfile(readDemoProfile());
+  }, []);
+
   useEffect(() => {
-    // 1. Check active Supabase session
-    const getInitialSession = async () => {
+    let mounted = true;
+
+    const init = async () => {
       try {
-        const { data: { session: currentSession } } = await supabase.auth.getSession();
-        if (currentSession) {
-          setSession(currentSession);
-          setUser(currentSession.user);
-          const metaRole = (currentSession.user.user_metadata?.role as UserRole) || "coordinator";
-          const fullName = currentSession.user.user_metadata?.full_name || currentSession.user.email?.split("@")[0] || "User";
-          setProfile({
-            id: currentSession.user.id,
-            email: currentSession.user.email || "",
-            role: metaRole,
-            fullName,
-          });
-        } else {
-          // Check local storage for quick session/demo state
-          const savedRole = localStorage.getItem("rg_role") as UserRole;
-          const savedEmail = localStorage.getItem("rg_email");
-          const savedName = localStorage.getItem("rg_name");
-          if (savedRole && savedEmail) {
-            setProfile({
-              id: "local-user",
-              email: savedEmail,
-              role: savedRole,
-              fullName: savedName || savedEmail.split("@")[0],
-            });
-          }
-        }
+        const { data } = await supabase.auth.getSession();
+        if (!mounted) return;
+        applySession(data.session);
       } catch (err) {
-        console.error("Session check error:", err);
+        console.warn("Supabase session check failed:", err);
+        if (mounted) setProfile(readDemoProfile());
       } finally {
-        setLoading(false);
+        if (mounted) setLoading(false);
       }
     };
 
-    getInitialSession();
+    init();
 
-    // 2. Subscribe to auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
-      setUser(newSession?.user ?? null);
-      if (newSession?.user) {
-        const metaRole = (newSession.user.user_metadata?.role as UserRole) || "coordinator";
-        const fullName = newSession.user.user_metadata?.full_name || newSession.user.email?.split("@")[0] || "User";
-        setProfile({
-          id: newSession.user.id,
-          email: newSession.user.email || "",
-          role: metaRole,
-          fullName,
-        });
-      } else {
-        const savedRole = localStorage.getItem("rg_role") as UserRole;
-        if (!savedRole) {
-          setProfile(null);
-        }
-      }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, next) => {
+      if (!mounted) return;
+      applySession(next);
       setLoading(false);
     });
 
     return () => {
+      mounted = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [applySession]);
 
   const signOut = async () => {
-    try {
-      await supabase.auth.signOut();
-    } catch {
-      // Ignore
-    }
-    localStorage.removeItem("rg_role");
-    localStorage.removeItem("rg_email");
-    localStorage.removeItem("rg_name");
+    clearDemoStorage();
     setUser(null);
     setSession(null);
     setProfile(null);
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // Ignore network errors on sign out
+    }
   };
 
-  const setDemoUser = (role: UserRole, email: string, name: string) => {
-    localStorage.setItem("rg_role", role);
-    localStorage.setItem("rg_email", email);
-    localStorage.setItem("rg_name", name);
-    setProfile({
-      id: "demo-user-" + Date.now(),
+  const setDemoUser = (role: UserRole, email: string, name: string): UserProfile => {
+    writeDemoProfile(role, email, name);
+    const next: UserProfile = {
+      id: "local-demo-user",
       email,
       role,
       fullName: name,
-    });
+      isDemo: true,
+    };
+    setUser(null);
+    setSession(null);
+    setProfile(next);
+    void supabase.auth.signOut({ scope: "local" }).catch(() => {});
+    return next;
   };
 
   return (
