@@ -12,11 +12,20 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models.models import (
+    Action,
+    ActionVerification,
+    AgentObservation,
     AgentRun,
     AgentRunStep,
+    AgentRecommendation,
     Appointment,
+    Bottleneck,
     Case,
     CaseEvent,
+    Communication,
+    Document,
+    Escalation,
+    FollowUp,
     Specialist,
 )
 
@@ -43,7 +52,7 @@ def get_case(db: Session, case_id: str) -> Optional[dict[str, Any]]:
             "id": sb_case.get("id", case_id),
             "child_identifier": sb_case.get("child_identifier") or sb_case.get("child_id", "STU-UNKNOWN"),
             "referral_type": sb_case.get("referral_type", "Evaluation"),
-            "status": sb_case.get("status", "STUCK"),
+            "status": sb_case.get("status") or "NEW",
             "coordinator_id": sb_case.get("coordinator_id"),
             "assigned_specialist_id": sb_case.get("assigned_specialist_id"),
             "current_bottleneck": sb_case.get("current_bottleneck") or sb_case.get("bottleneck"),
@@ -86,6 +95,7 @@ def _case_to_dict(case: Case) -> dict[str, Any]:
         "current_responsible_person": case.current_responsible_person,
         "coordinator_notes": case.coordinator_notes,
         "diagnostic_details": case.diagnostic_details,
+        "educator_summary": case.educator_summary,
         "created_date": case.created_date.isoformat() if case.created_date else None,
         "last_activity": case.last_activity.isoformat() if case.last_activity else None,
         "next_followup_date": (
@@ -448,10 +458,32 @@ def update_case(
 
 
 def delete_case(db: Session, case_id: str) -> bool:
-    """Delete a case and associated records."""
+    """Delete a case and all associated records (explicit cascade for SQLite)."""
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         return False
+
+    # Delete leaves first (tables that reference child tables, not just cases)
+    db.query(ActionVerification).filter(ActionVerification.case_id == case_id).delete(synchronize_session=False)
+    db.query(AgentRunStep).filter(AgentRunStep.case_id == case_id).delete(synchronize_session=False)
+
+    # Delete agent-side records
+    db.query(Action).filter(Action.case_id == case_id).delete(synchronize_session=False)
+    db.query(AgentRecommendation).filter(AgentRecommendation.case_id == case_id).delete(synchronize_session=False)
+    db.query(AgentObservation).filter(AgentObservation.case_id == case_id).delete(synchronize_session=False)
+    db.query(Bottleneck).filter(Bottleneck.case_id == case_id).delete(synchronize_session=False)
+    db.query(AgentRun).filter(AgentRun.case_id == case_id).delete(synchronize_session=False)
+
+    # Delete case-related records
+    db.query(ActionVerification).filter(ActionVerification.case_id == case_id).delete(synchronize_session=False)
+    db.query(Appointment).filter(Appointment.case_id == case_id).delete(synchronize_session=False)
+    db.query(Escalation).filter(Escalation.case_id == case_id).delete(synchronize_session=False)
+    db.query(FollowUp).filter(FollowUp.case_id == case_id).delete(synchronize_session=False)
+    db.query(Communication).filter(Communication.case_id == case_id).delete(synchronize_session=False)
+    db.query(Document).filter(Document.case_id == case_id).delete(synchronize_session=False)
+    db.query(CaseEvent).filter(CaseEvent.case_id == case_id).delete(synchronize_session=False)
+
+    # Finally delete the case itself
     db.delete(case)
     db.commit()
     return True

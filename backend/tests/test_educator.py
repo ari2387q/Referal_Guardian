@@ -91,3 +91,30 @@ def test_specialist_availability_and_diagnostics(client):
     # Verify timeline event was added
     timeline_events = [e["event_type"] for e in diag_data["timeline"]]
     assert "DIAGNOSTIC_EVALUATION_LOGGED" in timeline_events
+
+
+def test_delete_case_with_associated_records(client):
+    # 1. Create a case
+    create_res = client.post("/api/cases", json={
+        "child_identifier": "CHILD-DELETE-TEST",
+        "referral_type": "SPEECH_LANGUAGE",
+        "coordinator_notes": "Test case for deletion with associated records.",
+        "current_bottleneck": "SPECIALIST_UNAVAILABLE"
+    })
+    assert create_res.status_code in (200, 201)
+    case_id = create_res.json()["id"]
+
+    # 2. Run agent to populate recommendations and actions
+    run_res = client.post(f"/api/cases/{case_id}/agent/run")
+    assert run_res.status_code == 200
+
+
+    # 3. Delete case (must handle cascading child deletions without IntegrityError)
+    del_res = client.delete(f"/api/cases/{case_id}")
+    assert del_res.status_code == 200
+    assert del_res.json()["success"] is True
+
+    # 4. Verify case is gone
+    get_res = client.get(f"/api/cases/{case_id}")
+    assert get_res.status_code == 404
+

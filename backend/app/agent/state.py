@@ -22,6 +22,7 @@ class ReferralState(TypedDict, total=False):
     bottleneck: Optional[dict[str, Any]]
     recommendation: Optional[dict[str, Any]]
     recommendation_id: Optional[str]   # DB ID of the saved AgentRecommendation
+    educator_summary: Optional[str]
 
     # --- Human decision ---
     human_decision: Optional[str]          # APPROVE | REJECT | MODIFY

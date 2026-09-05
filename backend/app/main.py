@@ -6,8 +6,13 @@ All existing route paths are preserved.
 """
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, Optional
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,7 +43,9 @@ logging.basicConfig(level=logging.INFO)
 async def lifespan(app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
-        logger.info("Database tables ensured")
+        from app.models.database import ensure_sqlite_columns
+        ensure_sqlite_columns()
+        logger.info("Database tables and columns ensured")
     except Exception as exc:
         logger.warning("Could not create tables (may already exist): %s", exc)
     yield
@@ -192,7 +199,7 @@ def get_case_detail(case_id: str, db: Session = Depends(get_db)):
 def update_case_detail(case_id: str, body: UpdateCaseRequest, db: Session = Depends(get_db)):
     """Coordinator endpoint: Update case metadata or status."""
     from app.services.case_service import update_case
-    updates = body.dict(exclude_unset=True)
+    updates = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict(exclude_unset=True)
     res = update_case(db, case_id, updates)
     if not res:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -328,6 +335,7 @@ def _case_to_response(case: Case, db: Session, include_timeline: bool = False) -
         "current_bottleneck": case.current_bottleneck,
         "coordinator_notes": case.coordinator_notes,
         "diagnostic_details": case.diagnostic_details,
+        "educator_summary": getattr(case, "educator_summary", None),
         "created_date": case.created_date.isoformat() if case.created_date else None,
         "last_activity": case.last_activity.isoformat() if case.last_activity else None,
         "days_open": days_open,

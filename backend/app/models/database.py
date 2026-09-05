@@ -25,6 +25,19 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def ensure_sqlite_columns():
+    """Ensure missing columns are safely added to existing SQLite tables."""
+    if DATABASE_URL.startswith("sqlite"):
+        try:
+            with engine.connect() as conn:
+                res = conn.exec_driver_sql("PRAGMA table_info(cases)")
+                cols = [row[1] for row in res.fetchall()]
+                if "educator_summary" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE cases ADD COLUMN educator_summary TEXT")
+        except Exception:
+            pass
+
+
 def get_db():
     db = SessionLocal()
     try:

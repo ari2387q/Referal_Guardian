@@ -90,6 +90,12 @@ def seed_database():
             referral_type="Speech-Language Evaluation",
             status="STUCK",
             current_bottleneck="SPECIALIST_UNAVAILABLE",
+            educator_summary=(
+                "• Referral & Student Background: Student STU-8821 referred for Speech-Language Evaluation (18 days open).\n"
+                "• Identified Bottleneck: Assigned specialist Dr. Sarah Jenkins is UNAVAILABLE for new evaluations.\n"
+                "• Referral Guardian Action: FIND ALTERNATIVE SPECIALIST proposed (Dr. Marcus Vance available in 2 days).\n"
+                "• Special Educator Next Steps: Prepare speech baseline assessments and confirm schedule once coordinator approves reassignment."
+            ),
             created_date=now - datetime.timedelta(days=18),
             last_activity=now - datetime.timedelta(days=3),
             followup_attempts=2,
@@ -155,6 +161,12 @@ def seed_database():
             referral_type="IEP Behavioral Assessment",
             status="STUCK",
             current_bottleneck="REPEATED_FAILURE",
+            educator_summary=(
+                "• Referral & Student Background: Student STU-9922 referred for IEP Behavioral Assessment (25 days open).\n"
+                "• Identified Bottleneck: 3 consecutive outreach attempts unanswered by clinic partner.\n"
+                "• Referral Guardian Action: ESCALATE CASE proposed to district administrative liaison.\n"
+                "• Special Educator Next Steps: Gather classroom behavioral observation logs for expedited district review."
+            ),
             created_date=now - datetime.timedelta(days=25),
             last_activity=now - datetime.timedelta(days=2),
             followup_attempts=3,
@@ -178,20 +190,20 @@ def seed_database():
             CaseEvent(
                 case_id="CASE-1043",
                 event_type="NO_RESPONSE",
-                details="Attempt 1: No response received after 5 business days.",
+                details="Attempt 1: No response after 5 days.",
                 timestamp=now - datetime.timedelta(days=15),
             ),
             CaseEvent(
                 case_id="CASE-1043",
                 event_type="FOLLOWUP_SENT",
-                details="Attempt 2: Second follow-up sent with high urgency.",
-                timestamp=now - datetime.timedelta(days=12),
+                details="Attempt 2: Urgent follow-up sent to clinic director.",
+                timestamp=now - datetime.timedelta(days=10),
             ),
             CaseEvent(
                 case_id="CASE-1043",
                 event_type="NO_RESPONSE",
-                details="Attempt 2: No response from provider.",
-                timestamp=now - datetime.timedelta(days=7),
+                details="Attempt 2: No response after 6 days.",
+                timestamp=now - datetime.timedelta(days=4),
             ),
             CaseEvent(
                 case_id="CASE-1043",
@@ -215,6 +227,12 @@ def seed_database():
             referral_type="Physical Therapy Evaluation",
             status="STUCK",
             current_bottleneck="MISSING_DOCUMENT",
+            educator_summary=(
+                "• Referral & Student Background: Student STU-7711 referred for Physical Therapy Evaluation (7 days open).\n"
+                "• Identified Bottleneck: Missing pediatric physical therapy prescription form.\n"
+                "• Referral Guardian Action: REQUEST DOCUMENT sent to parent and pediatrician office.\n"
+                "• Special Educator Next Steps: Confirm motor skill accommodation plan pending medical clearance."
+            ),
             created_date=now - datetime.timedelta(days=7),
             last_activity=now - datetime.timedelta(days=1),
             followup_attempts=1,

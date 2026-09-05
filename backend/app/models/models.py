@@ -51,6 +51,7 @@ class Case(Base):
     current_responsible_person = Column(String, nullable=True)
     coordinator_notes = Column(Text, nullable=True)
     diagnostic_details = Column(Text, nullable=True)
+    educator_summary = Column(Text, nullable=True)
     created_date = Column(DateTime, default=datetime.datetime.utcnow)
     last_activity = Column(DateTime, default=datetime.datetime.utcnow)
     next_followup_date = Column(DateTime, nullable=True)

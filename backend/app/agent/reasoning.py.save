@@ -86,40 +86,38 @@ def _mock_recommend(bottleneck: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# LLM provider (Supports OpenRouter, OpenAI, and Mock)
+# LLM provider (OpenRouter & OpenAI support)
 # ---------------------------------------------------------------------------
 
 def _get_llm():
-    """Create the LLM instance supporting OpenRouter, OpenAI, or custom endpoints."""
+    """Create the LLM. Supports OpenRouter, OpenAI, or falls back gracefully."""
     from langchain_openai import ChatOpenAI
 
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+    openai_api_key = os.getenv("OPENAI_API_KE")
 
-    if openrouter_key:
-        model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
-        logger.info("Initializing LLM via OpenRouter (model=%s)", model)
+    if openrouter_api_key:
+        model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        logger.info("Initializing LLM via OpenRouter (model=%s, base_url=%s)", model, base_url)
         return ChatOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=openrouter_key,
             model=model,
-            temperature=0,
+            api_key=openrouter_api_key,
+            base_url=base_url,
             default_headers={
                 "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "http://localhost:3000"),
                 "X-Title": "Referral Guardian",
             },
-        )
-    elif openai_key:
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        logger.info("Initializing LLM via OpenAI (model=%s)", model)
-        return ChatOpenAI(
-            api_key=openai_key,
-            model=model,
             temperature=0,
         )
-    else:
-        logger.info("No API keys found; using mock LLM fallback")
-        return None
+
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    logger.info("Initializing LLM via standard OpenAI (model=%s)", model)
+    return ChatOpenAI(
+        model=model,
+        api_key=openai_api_key or "dummy-key",
+        temperature=0,
+    )
 
 
 def _extract_json(content: str) -> dict[str, Any]:
@@ -143,9 +141,6 @@ def _llm_recommend(
 ) -> dict[str, Any]:
     """Call the LLM and return a validated recommendation."""
     llm = _get_llm()
-    if llm is None:
-        return _mock_recommend(bottleneck)
-
     allowed_actions = sorted(ALLOWED_ACTION_VALUES)
 
     specialists_section = (
@@ -233,6 +228,13 @@ def _validate_recommendation(recommendation: dict[str, Any]) -> dict[str, Any]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _resolve_provider() -> str:
+    """Determine LLM provider. Defaults to OpenRouter if key is set, else env var or mock."""
+    if os.getenv("OPENROUTER_API_KEY"):
+        return "openrouter"
+    return os.getenv("LLM_PROVIDER", "mock").lower()
+
+
 def recommend_action(
     case: dict[str, Any],
     timeline: list[dict[str, Any]],
@@ -242,93 +244,96 @@ def recommend_action(
     """
     Recommend the next operational action for a stuck referral case.
 
-    Checks OPENROUTER_API_KEY, OPENAI_API_KEY, or LLM_PROVIDER env vars.
+    Uses OpenRouter, OpenAI, or Mock provider.
     Returns a validated recommendation dict.
     """
-    provider = os.getenv("LLM_PROVIDER", "").lower()
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
+    provider = _resolve_provider()
     specialists = specialists or []
 
-    # If explicitly forced to mock, or no API keys available
-    if provider == "mock" or (not openrouter_key and not openai_key and provider not in ("openrouter", "openai")):
-        logger.info("Using mock LLM provider")
-        recommendation = _mock_recommend(bottleneck)
-        return _validate_recommendation(recommendation)
-
     try:
-        recommendation = _llm_recommend(case, timeline, bottleneck, specialists)
+        if provider == "mock":
+            logger.info("Using mock LLM provider for recommendation")
+            recommendation = _mock_recommend(bottleneck)
+        else:
+            logger.info("Using LLM provider (%s) for recommendation", provider)
+            recommendation = _llm_recommend(case, timeline, bottleneck, specialists)
+
         return _validate_recommendation(recommendation)
 
     except ValueError:
         raise
     except Exception as exc:
-        logger.exception("LLM recommendation failed (%s), using mock fallback", exc)
+        logger.exception("LLM recommendation failed, using mock fallback: %s", exc)
         recommendation = _mock_recommend(bottleneck)
         recommendation["_fallback"] = True
         return _validate_recommendation(recommendation)
 
 
-# ---------------------------------------------------------------------------
-# Special Educator Referral Summary Generator
-# ---------------------------------------------------------------------------
-
-def generate_educator_summary(
+def generate_clinical_summary(
     case: dict[str, Any],
     timeline: list[dict[str, Any]],
-    bottleneck: Optional[dict[str, Any]] = None,
-    recommendation: Optional[dict[str, Any]] = None,
+    bottleneck: Optional[dict[str, Any]],
+    recommendation: Optional[dict[str, Any]],
 ) -> str:
     """
-    Generate a clinical and operational referral handoff summary for the Special Educator.
-    Invokes OpenRouter / OpenAI if available, or falls back to a deterministic summary.
+    Generate a concise clinical handoff summary for the Special Educator.
+    Uses OpenRouter/OpenAI when available, falling back to a structured clinical template.
     """
-    child_id = case.get("child_identifier") or case.get("child_id", "Unknown Child")
-    referral_type = case.get("referral_type", "Special Education Evaluation")
-    days_open = case.get("days_open", 0)
-    specialist_name = case.get("assigned_specialist_name") or "Unassigned"
-    bottleneck_desc = bottleneck.get("description", "None identified") if bottleneck else "No active bottleneck"
-    rec_action = recommendation.get("action") or recommendation.get("recommended_action") if recommendation else "Pending review"
-    rec_reason = recommendation.get("reason", "Referral processing under active monitoring.") if recommendation else "Normal tracking."
+    provider = _resolve_provider()
 
-    llm = _get_llm()
-    if llm is not None:
+    if provider != "mock":
         try:
-            prompt = f"""You are an expert Special Education Referral Assistant.
-Write a clear, professional, bulleted Clinical & Operational Intake Summary for the Special Educator who is reviewing this child's referral case.
+            llm = _get_llm()
+            prompt = f"""You are Referral Guardian, an AI special education referral continuity system.
+Generate a concise 2-3 sentence clinical handoff summary specifically for a Special Educator / Diagnostic Specialist.
 
-CASE CONTEXT:
-- Student ID: {child_id}
-- Referral Type: {referral_type}
-- Days Open: {days_open} days
-- Assigned Specialist: {specialist_name}
-- Identified Bottleneck: {bottleneck_desc}
-- Referral Guardian Proposed Action: {rec_action} ({rec_reason})
-- Recent Milestones: {json.dumps(timeline[-5:], default=str)}
+Include:
+1. Child pseudonymous identifier and referral type.
+2. Current status and diagnosed operational bottleneck (e.g. specialist unavailable, delayed response, missing docs).
+3. The AI agent's recommended resolution and next clinical steps.
 
-REQUIREMENTS:
-1. Provide 3-4 concise, bulleted sections:
-   • Referral & Student Background
-   • Identified Friction / Bottleneck
-   • Action Taken / Proposed by Referral Guardian
-   • Special Educator Clinical Next Steps
-2. Keep the tone clinical, objective, and supportive.
-3. Plain text with bullets (no JSON, no markdown codeblocks).
-"""
+Keep the tone professional, objective, and clinically relevant.
+
+CASE DATA:
+{json.dumps(case, indent=2, default=str)}
+
+TIMELINE EVENTS:
+{json.dumps(timeline[-5:], indent=2, default=str)}
+
+IDENTIFIED BOTTLENECK:
+{json.dumps(bottleneck, indent=2, default=str)}
+
+PROPOSED ACTION:
+{json.dumps(recommendation, indent=2, default=str)}
+
+Respond with ONLY the summary text (no preamble, no quotes, no markdown fences):"""
+
             res = llm.invoke(prompt)
-            text = res.content
-            if isinstance(text, list):
-                text = "".join(item.get("text", str(item)) if isinstance(item, dict) else str(item) for item in text)
-            if text and len(text.strip()) > 30:
-                return text.strip()
+            summary_text = getattr(res, "content", str(res)).strip()
+            if summary_text:
+                return summary_text
         except Exception as exc:
-            logger.warning("LLM educator summary generation failed: %s, using fallback", exc)
+            logger.warning("LLM clinical summary generation failed, using template: %s", exc)
 
     # Deterministic fallback summary
-    return (
-        f"• Referral & Student Background: Student {child_id} referred for {referral_type} (active for {days_open} days). Assigned Specialist: {specialist_name}.\n"
-        f"• Identified Bottleneck: {bottleneck_desc}.\n"
-        f"• Referral Guardian Action: {rec_action.replace('_', ' ')} — {rec_reason}\n"
-        f"• Special Educator Next Steps: Review intake documentation, prepare assessment protocols, and coordinate directly with the specialist team upon resolution."
-    )
+    child_id = case.get("child_identifier") or case.get("child_id", "Unknown Child")
+    ref_type = case.get("referral_type", "Special Education Evaluation")
+    days_open = case.get("days_open", 0)
+    attempts = case.get("followup_attempts", 0)
+    b_type = bottleneck.get("type", "NONE") if bottleneck else "NONE"
+    rec_action = recommendation.get("action") or recommendation.get("recommended_action", "REVIEW_CASE") if recommendation else "REVIEW_CASE"
 
+    b_narrative = {
+        "SPECIALIST_UNAVAILABLE": "the assigned specialist is currently unavailable.",
+        "MISSING_DOCUMENT": "required diagnostic and background documentation is pending submission.",
+        "NO_SPECIALIST_RESPONSE": "specialist outreach has exceeded standard response turnaround times.",
+        "APPOINTMENT_DELAYED": "a scheduled clinical evaluation appointment is past due.",
+        "REPEATED_FAILURE": f"multiple follow-up attempts ({attempts}) have stalled, triggering escalation.",
+    }.get(b_type, "case review is in progress.")
+
+    return (
+        f"Referral for {child_id} ({ref_type}) has been open for {days_open} days. "
+        f"Operational analysis identified that {b_narrative} "
+        f"The agent recommended: {rec_action.replace('_', ' ')}. "
+        f"Clinical handoff prepared for Special Educator review."
+    )

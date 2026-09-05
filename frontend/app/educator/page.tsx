@@ -38,6 +38,7 @@ interface CaseItem {
   current_bottleneck?: string;
   coordinator_notes?: string;
   diagnostic_details?: string;
+  educator_summary?: string;
   days_open: number;
   last_activity?: string;
   recommendation?: {
@@ -321,6 +322,24 @@ export default function SpecialEducatorPortal() {
                   </Link>
                 </div>
               </div>
+
+              {/* AI Clinical & Operational Referral Handoff Summary */}
+              {c.educator_summary ? (
+                <div className="bg-gradient-to-br from-purple-50/90 to-indigo-50/90 border border-purple-200/80 rounded-xl p-4 space-y-2 shadow-xs">
+                  <div className="flex items-center space-x-2 text-purple-900 font-bold text-xs uppercase tracking-wide">
+                    <Sparkles className="w-4 h-4 text-purple-600 shrink-0" />
+                    <span>AI Referral Handoff Summary (Post-Agent Run)</span>
+                  </div>
+                  <div className="text-xs text-slate-800 whitespace-pre-line leading-relaxed font-medium pl-6">
+                    {c.educator_summary}
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-slate-50 border border-slate-200/80 rounded-lg p-3 text-xs text-slate-500 italic flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span>No AI summary generated yet. The referral handoff brief will appear here once the coordinator executes the agent.</span>
+                </div>
+              )}
 
               {/* Agent Recommendation Summary Card */}
               {c.recommendation && (

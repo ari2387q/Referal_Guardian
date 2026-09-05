@@ -17,6 +17,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import RouteGuard from "@/components/RouteGuard";
+import { useAuth } from "@/lib/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -88,6 +89,8 @@ interface CaseDetails {
 export default function CaseDetailPage() {
   const params = useParams();
   const caseId = (params?.id as string) || "CASE-1042";
+  const { profile } = useAuth();
+  const isCoordinator = !profile || profile.role === "coordinator";
 
   const [caseData, setCaseData] = useState<CaseDetails | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -362,12 +365,20 @@ export default function CaseDetailPage() {
                 <span className="bg-rose-100 text-rose-700 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-rose-200">
                   ESCALATED
                 </span>
-              ) : caseData.status === "STUCK" || Boolean(caseData.bottleneck) ? (
+              ) : caseData.status === "STUCK" ? (
                 <span className="bg-amber-100 text-amber-800 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-amber-200">
                   STUCK
                 </span>
-              ) : (
+              ) : caseData.status === "ACTIVE" ? (
+                <span className="bg-indigo-100 text-indigo-700 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-indigo-200">
+                  ACTIVE
+                </span>
+              ) : caseData.status === "RESOLVED" ? (
                 <span className="bg-emerald-100 text-emerald-700 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-emerald-200">
+                  RESOLVED
+                </span>
+              ) : (
+                <span className="bg-slate-100 text-slate-700 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-slate-200">
                   {caseData.status}
                 </span>
               )}
@@ -377,14 +388,16 @@ export default function CaseDetailPage() {
             </p>
           </div>
 
-          <button
-            onClick={handleRunAgent}
-            disabled={runningAgent}
-            className="inline-flex items-center justify-center space-x-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-semibold text-sm px-5 py-2.5 rounded-lg shadow-sm transition disabled:opacity-50"
-          >
-            <Sparkles className={`w-4 h-4 ${runningAgent ? "animate-spin" : ""}`} />
-            <span>{runningAgent ? "Evaluating Graph..." : "Run Referral Guardian AI"}</span>
-          </button>
+          {isCoordinator && (
+            <button
+              onClick={handleRunAgent}
+              disabled={runningAgent}
+              className="inline-flex items-center justify-center space-x-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-semibold text-sm px-5 py-2.5 rounded-lg shadow-sm transition disabled:opacity-50"
+            >
+              <Sparkles className={`w-4 h-4 ${runningAgent ? "animate-spin" : ""}`} />
+              <span>{runningAgent ? "Evaluating Graph..." : "Run Referral Guardian AI"}</span>
+            </button>
+          )}
         </div>
 
         {/* Highlighted Alerts */}
@@ -546,31 +559,37 @@ export default function CaseDetailPage() {
 
                   {/* Approval Action Buttons */}
                   {!isModifying && (
-                    <div className="flex items-center space-x-3 pt-4 border-t border-slate-200">
-                      <button
-                        onClick={handleApproveAction}
-                        disabled={runningAgent}
-                        className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm py-3 rounded-lg transition shadow-xs flex items-center justify-center space-x-2 disabled:opacity-50"
-                      >
-                        <CheckCircle2 className="w-5 h-5" />
-                        <span>APPROVE & EXECUTE</span>
-                      </button>
-                      <button
-                        onClick={() => setIsModifying(true)}
-                        disabled={runningAgent}
-                        className="bg-amber-500 hover:bg-amber-600 text-white font-semibold text-sm px-5 py-3 rounded-lg transition shadow-xs flex items-center space-x-1.5 disabled:opacity-50"
-                      >
-                        <Edit3 className="w-4 h-4" />
-                        <span>MODIFY</span>
-                      </button>
-                      <button
-                        onClick={handleRejectAction}
-                        disabled={runningAgent}
-                        className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-sm px-5 py-3 rounded-lg transition disabled:opacity-50"
-                      >
-                        REJECT
-                      </button>
-                    </div>
+                    isCoordinator ? (
+                      <div className="flex flex-wrap items-center gap-3 pt-2">
+                        <button
+                          onClick={handleApproveAction}
+                          disabled={runningAgent}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm px-6 py-3 rounded-lg transition shadow-xs flex items-center space-x-2 disabled:opacity-50"
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>APPROVE & EXECUTE</span>
+                        </button>
+                        <button
+                          onClick={() => setIsModifying(true)}
+                          disabled={runningAgent}
+                          className="bg-amber-500 hover:bg-amber-600 text-white font-semibold text-sm px-5 py-3 rounded-lg transition shadow-xs flex items-center space-x-1.5 disabled:opacity-50"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                          <span>MODIFY</span>
+                        </button>
+                        <button
+                          onClick={handleRejectAction}
+                          disabled={runningAgent}
+                          className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-sm px-5 py-3 rounded-lg transition disabled:opacity-50"
+                        >
+                          REJECT
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="pt-2 text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5 font-medium">
+                        ℹ️ Pending review & approval by the Referral Coordinator.
+                      </div>
+                    )
                   )}
                 </div>
               ) : (
@@ -579,17 +598,21 @@ export default function CaseDetailPage() {
                   <div>
                     <h3 className="font-bold text-slate-800 text-base">No Pending Recommendation</h3>
                     <p className="text-sm text-slate-500 max-w-md mx-auto mt-1">
-                      Click <strong>"Run Referral Guardian AI"</strong> to evaluate the case history, detect bottlenecks, and propose next-best actions.
+                      {isCoordinator
+                        ? 'Click "Run Referral Guardian AI" to evaluate the case history, detect bottlenecks, and propose next-best actions.'
+                        : 'No pending recommendation. Agent evaluations and approvals are coordinated by the case coordinator.'}
                     </p>
                   </div>
-                  <button
-                    onClick={handleRunAgent}
-                    disabled={runningAgent}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg shadow-xs disabled:opacity-50 inline-flex items-center gap-2"
-                  >
-                    <Sparkles className="w-4 h-4" />
-                    <span>Run Agent Now</span>
-                  </button>
+                  {isCoordinator && (
+                    <button
+                      onClick={handleRunAgent}
+                      disabled={runningAgent}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-5 py-2.5 rounded-lg shadow-xs disabled:opacity-50 inline-flex items-center gap-2"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>Run Agent Now</span>
+                    </button>
+                  )}
                 </div>
               )}
             </div>

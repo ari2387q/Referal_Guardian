@@ -13,7 +13,7 @@ from langgraph.types import interrupt
 
 from app.agent.actions import is_valid_action
 from app.agent.bottleneck import detect_bottleneck
-from app.agent.reasoning import recommend_action
+from app.agent.reasoning import generate_educator_summary, recommend_action
 from app.agent.state import ReferralState
 from app.agent.verification import verify_action
 
@@ -189,6 +189,19 @@ def reasoning_node(state: ReferralState) -> dict[str, Any]:
             "status": "PENDING",
         })
 
+        # Generate and persist clinical handoff summary for Special Educator
+        from app.models.models import Case
+        educator_summary_text = generate_educator_summary(
+            case=state.get("case", {}),
+            timeline=state.get("timeline", []),
+            bottleneck=bottleneck,
+            recommendation=recommendation,
+        )
+        case_obj = db.query(Case).filter(Case.id == case_id).first()
+        if case_obj:
+            case_obj.educator_summary = educator_summary_text
+            db.commit()
+
         record_event(
             db, case_id, "RECOMMENDATION_CREATED",
             json.dumps({**recommendation, "recommendation_id": rec_id}, default=str),
@@ -199,6 +212,7 @@ def reasoning_node(state: ReferralState) -> dict[str, Any]:
     return {
         "recommendation": recommendation,
         "recommendation_id": rec_id,
+        "educator_summary": educator_summary_text,
         "requires_approval": True,
     }
 
