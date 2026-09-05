@@ -83,18 +83,23 @@ def supabase_get_timeline(case_id: str) -> list[dict[str, Any]]:
     client = get_supabase()
     if not client:
         return []
-    try:
-        res = (
-            client.table("case_events")
-            .select("*")
-            .eq("case_id", case_id)
-            .order("timestamp")
-            .execute()
-        )
-        return res.data or []
-    except Exception as exc:
-        logger.warning("Supabase select timeline for case %s error: %s", case_id, exc)
-        return []
+    # Try ordering by `timestamp` first (post-migration); fall back to `created_at`
+    for order_col in ("timestamp", "created_at"):
+        try:
+            res = (
+                client.table("case_events")
+                .select("*")
+                .eq("case_id", case_id)
+                .order(order_col)
+                .execute()
+            )
+            return res.data or []
+        except Exception as exc:
+            logger.warning(
+                "Supabase select timeline for case %s (order=%s) error: %s",
+                case_id, order_col, exc,
+            )
+    return []
 
 
 def supabase_insert(table: str, data: dict[str, Any]) -> Optional[dict[str, Any]]:
